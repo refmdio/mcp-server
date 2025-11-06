@@ -627,6 +627,7 @@ if (normalizedDriver) {
 
 const allowedClientIdSet = new Set(allowedClientIds);
 const allowedRedirectSet = new Set(allowedRedirects);
+const registeredClients = new Map<string, Set<string>>();
 
 function randomToken(bytes = 32): string {
   return crypto.randomBytes(bytes).toString('base64url');
@@ -640,14 +641,35 @@ function parseScopes(scope?: string): string[] {
     .filter((item) => item.length > 0);
 }
 
+function rememberClientRegistration(clientId: string, redirectUris: string[]): void {
+  if (!registeredClients.has(clientId)) {
+    registeredClients.set(clientId, new Set<string>());
+  }
+  const redirectSet = registeredClients.get(clientId)!;
+  for (const uri of redirectUris) {
+    redirectSet.add(uri);
+    if (allowedRedirectSet.size === 0) {
+      continue;
+    }
+    if (allowedRedirectSet.has(uri)) {
+      continue;
+    }
+    allowedRedirectSet.add(uri);
+  }
+  allowedClientIdSet.add(clientId);
+}
+
 function isClientAllowed(clientId: string): boolean {
+  if (registeredClients.has(clientId)) {
+    return true;
+  }
   return allowedClientIdSet.size === 0 || allowedClientIdSet.has(clientId);
 }
 
-function isRedirectAllowed(uri: string): boolean {
+function isRedirectUriSafe(uri: string): boolean {
   if (allowedRedirectSet.size > 0 && !allowedRedirectSet.has(uri)) {
     return false;
-}
+  }
   try {
     const parsed = new URL(uri);
     if (parsed.protocol === 'https:') return true;
@@ -661,6 +683,20 @@ function isRedirectAllowed(uri: string): boolean {
     return false;
   }
   return false;
+}
+
+function isRedirectAllowed(uri: string, clientId?: string): boolean {
+  if (!isRedirectUriSafe(uri)) {
+    return false;
+  }
+  if (!clientId) {
+    return true;
+  }
+  const registered = registeredClients.get(clientId);
+  if (!registered || registered.size === 0) {
+    return true;
+  }
+  return registered.has(uri);
 }
 
 function hashCodeVerifier(verifier: string): string {
@@ -781,7 +817,10 @@ function firstString(value: unknown): string | undefined {
   return undefined;
 }
 
-function validateClientAndRedirect(clientId: string, redirectUri: string): { ok: boolean; error?: string } {
+function validateClientAndRedirect(clientId: string, redirectUri: string): {
+  ok: boolean;
+  error?: string;
+} {
   if (!clientId) {
     return { ok: false, error: 'invalid_client' };
   }
@@ -791,7 +830,7 @@ function validateClientAndRedirect(clientId: string, redirectUri: string): { ok:
   if (!redirectUri) {
     return { ok: false, error: 'invalid_request' };
   }
-  if (!isRedirectAllowed(redirectUri)) {
+  if (!isRedirectAllowed(redirectUri, clientId)) {
     return { ok: false, error: 'invalid_redirect_uri' };
   }
   return { ok: true };
@@ -1413,6 +1452,31 @@ const tokenRequestSchema = z.object({
   refresh_token: z.string().optional(),
 });
 
+const redirectUriArraySchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return [value];
+  }
+  return value;
+}, z.array(z.string().url()).min(1));
+
+const stringArraySchema = z.preprocess((value) => {
+  if (typeof value === 'string') {
+    return [value];
+  }
+  return value;
+}, z.array(z.string().min(1)));
+
+const clientRegistrationSchema = z
+  .object({
+    client_name: z.string().trim().optional(),
+    redirect_uris: redirectUriArraySchema,
+    grant_types: stringArraySchema.optional(),
+    response_types: stringArraySchema.optional(),
+    token_endpoint_auth_method: z.string().trim().optional(),
+    scope: z.string().trim().optional(),
+  })
+  .passthrough();
+
 function renderAuthorizePage(params: {
   values: z.infer<typeof authorizeQuerySchema>;
   error?: string;
@@ -1474,6 +1538,86 @@ const oauthMetadataPaths = [
   '/.well-known/oauth-authorization-server/mcp',
   '/mcp/.well-known/oauth-authorization-server',
 ];
+
+app.post('/register', (req: Request, res: ExpressResponse) => {
+  const parsed = clientRegistrationSchema.safeParse(req.body ?? {});
+  if (!parsed.success) {
+    res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description: 'Invalid client registration payload.',
+      details: parsed.error.flatten(),
+    });
+    return;
+  }
+
+  const payload = parsed.data;
+  const redirectUris = payload.redirect_uris;
+  const requestedGrantTypes = payload.grant_types ?? ['authorization_code', 'refresh_token'];
+  const unsupportedGrantType = requestedGrantTypes.find(
+    (value) => value !== 'authorization_code' && value !== 'refresh_token',
+  );
+  if (unsupportedGrantType) {
+    res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description: `Unsupported grant_type: ${unsupportedGrantType}`,
+    });
+    return;
+  }
+  if (!requestedGrantTypes.includes('authorization_code')) {
+    res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description: 'authorization_code grant_type is required',
+    });
+    return;
+  }
+  const grantTypes = Array.from(
+    new Set(requestedGrantTypes.filter((value) => value === 'authorization_code' || value === 'refresh_token')),
+  );
+
+  const requestedResponseTypes = payload.response_types ?? ['code'];
+  const unsupportedResponseType = requestedResponseTypes.find((value) => value !== 'code');
+  if (unsupportedResponseType) {
+    res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description: `Unsupported response_type: ${unsupportedResponseType}`,
+    });
+    return;
+  }
+  const responseTypes = ['code'];
+
+  const tokenEndpointAuthMethod = (payload.token_endpoint_auth_method ?? 'none').toLowerCase();
+  if (tokenEndpointAuthMethod !== 'none') {
+    res.status(400).json({
+      error: 'invalid_client_metadata',
+      error_description: 'Only public clients (token_endpoint_auth_method "none") are supported',
+    });
+    return;
+  }
+
+  for (const uri of redirectUris) {
+    if (!isRedirectUriSafe(uri)) {
+      res.status(400).json({
+        error: 'invalid_redirect_uri',
+        error_description: `Redirect URI not allowed: ${uri}`,
+      });
+      return;
+    }
+  }
+
+  const clientId = randomToken(24);
+  rememberClientRegistration(clientId, redirectUris);
+
+  res.status(201).json({
+    client_id: clientId,
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    client_name: payload.client_name,
+    redirect_uris: redirectUris,
+    grant_types: grantTypes,
+    response_types: responseTypes,
+    token_endpoint_auth_method: 'none',
+    scope: payload.scope,
+  });
+});
 
 app.get(oauthMetadataPaths, (req: Request, res: ExpressResponse) => {
   const issuer = issuerFromRequest(req);
