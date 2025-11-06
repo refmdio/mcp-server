@@ -1405,9 +1405,9 @@ function renderAuthorizePage(params: {
       h1 { font-size: 1.4rem; margin-bottom: 0.5rem; }
       p { color: #cbd5f5; font-size: 0.95rem; line-height: 1.4; }
       label { display: block; font-size: 0.85rem; margin-bottom: 0.35rem; color: #e2e8f0; }
-      input[type="password"], input[type="text"] { width: 100%; padding: 0.65rem 0.75rem; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.4); background: rgba(15, 23, 42, 0.6); color: #f8fafc; font-size: 0.95rem; }
+      input[type="password"], input[type="text"] { width: 100%; padding: 0.65rem 0.75rem; border-radius: 8px; border: 1px solid rgba(148, 163, 184, 0.4); background: rgba(15, 23, 42, 0.6); color: #f8fafc; font-size: 0.95rem; box-sizing: border-box; }
       input[type="password"]:focus { outline: 2px solid #60a5fa; }
-      button { appearance: none; border: none; background: linear-gradient(135deg, #38bdf8, #818cf8); color: #0f1729; font-weight: 600; padding: 0.65rem 1rem; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 1rem; font-size: 0.95rem; }
+      button { appearance: none; border: none; background: linear-gradient(135deg, #38bdf8, #818cf8); color: #0f1729; font-weight: 600; padding: 0.65rem 1rem; border-radius: 8px; cursor: pointer; width: 100%; margin-top: 1rem; font-size: 0.95rem; box-sizing: border-box; }
       button:disabled { opacity: 0.6; cursor: not-allowed; }
       .error { background: rgba(248, 113, 113, 0.12); border: 1px solid rgba(248, 113, 113, 0.35); color: #fecaca; padding: 0.75rem; border-radius: 8px; margin-bottom: 1rem; }
       .input-group { margin-top: 1.25rem; }
