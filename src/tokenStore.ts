@@ -106,20 +106,13 @@ class InMemoryTokenStore implements TokenStore {
     if (!record) return null;
     if (record.expiresAt <= Date.now()) {
       this.accessTokens.delete(token);
-      if (record.refreshToken) {
-        this.refreshTokens.delete(record.refreshToken);
-      }
       return null;
     }
     return record;
   }
 
   async deleteAccessToken(token: string): Promise<void> {
-    const record = this.accessTokens.get(token);
     this.accessTokens.delete(token);
-    if (record?.refreshToken) {
-      this.refreshTokens.delete(record.refreshToken);
-    }
   }
 
   async saveRefreshToken(record: StoredRefreshToken): Promise<void> {
