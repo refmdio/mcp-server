@@ -528,6 +528,27 @@ async function fetchCurrentUser(baseUrl: string, token: string): Promise<RefMDUs
   };
 }
 
+const DEFAULT_ACCESS_TOKEN_TTL_SECONDS = 3600;
+const DEFAULT_REFRESH_TOKEN_TTL_SECONDS = 60 * 60 * 24 * 30;
+
+function parseDurationEnv(value: string | undefined, fallbackSeconds: number, envVar: string): number {
+  if (value === undefined) {
+    return fallbackSeconds;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallbackSeconds;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `${envVar} is invalid ("${value}"); using default of ${fallbackSeconds} seconds.`,
+    );
+    return fallbackSeconds;
+  }
+  return parsed;
+}
+
 // Configuration ---------------------------------------------------------------
 
 const configSchema = z.object({
@@ -553,11 +574,15 @@ const configSchema = z.object({
   accessTokenTtlSeconds: z
     .string()
     .optional()
-    .transform((value) => (value ? Number.parseInt(value, 10) : 3600)),
+    .transform((value) =>
+      parseDurationEnv(value, DEFAULT_ACCESS_TOKEN_TTL_SECONDS, 'ACCESS_TOKEN_TTL_SECONDS'),
+    ),
   refreshTokenTtlSeconds: z
     .string()
     .optional()
-    .transform((value) => (value ? Number.parseInt(value, 10) : 60 * 60 * 24 * 30)),
+    .transform((value) =>
+      parseDurationEnv(value, DEFAULT_REFRESH_TOKEN_TTL_SECONDS, 'REFRESH_TOKEN_TTL_SECONDS'),
+    ),
   dbDriver: z.string().optional(),
   dbUrl: z.string().optional(),
   dbSqlitePath: z.string().optional(),
@@ -1550,6 +1575,18 @@ function buildFallbackAuthorizationValues(raw: {
   };
 }
 
+const HTML_ESCAPE_LOOKUP: Record<string, string> = {
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+};
+
+function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, (char) => HTML_ESCAPE_LOOKUP[char] ?? char);
+}
+
 function renderAuthorizePage(params: {
   values: AuthorizationRequestValues;
   error?: string;
@@ -1557,12 +1594,13 @@ function renderAuthorizePage(params: {
   const { values, error } = params;
   const hiddenInputs = Object.entries(values)
     .filter(([, value]) => value !== undefined)
-    .map(([key, value]) =>
-      `<input type="hidden" name="${key}" value="${String(value)}" />`,
-    )
+    .map(([key, value]) => {
+      const stringValue = typeof value === 'string' ? value : String(value);
+      return `<input type="hidden" name="${escapeHtml(key)}" value="${escapeHtml(stringValue)}" />`;
+    })
     .join('\n');
   const errorMarkup = error
-    ? `<div class="error">${error}</div>`
+    ? `<div class="error">${escapeHtml(error)}</div>`
     : '';
   return `<!DOCTYPE html>
 <html lang="en">
@@ -1598,8 +1636,8 @@ function renderAuthorizePage(params: {
         </div>
         <button type="submit">Authorize</button>
       </form>
-      <p class="meta">Client: <strong>${values.client_id}</strong></p>
-      <p class="meta">Redirect URI: <strong>${values.redirect_uri}</strong></p>
+      <p class="meta">Client: <strong>${escapeHtml(values.client_id)}</strong></p>
+      <p class="meta">Redirect URI: <strong>${escapeHtml(values.redirect_uri)}</strong></p>
     </main>
   </body>
 </html>`;
