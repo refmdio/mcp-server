@@ -1436,7 +1436,7 @@ const authorizeQuerySchema = z.object({
   state: z.string().optional(),
   scope: z.string().optional(),
   code_challenge: z.string().min(1),
-  code_challenge_method: z.enum(['S256', 'plain']).optional().default('S256'),
+  code_challenge_method: z.string().optional(),
 });
 
 const authorizeFormSchema = authorizeQuerySchema.extend({
@@ -1477,12 +1477,86 @@ const clientRegistrationSchema = z
   })
   .passthrough();
 
+type AuthorizationRequestValues = Omit<
+  z.infer<typeof authorizeQuerySchema>,
+  'code_challenge_method'
+> & {
+  code_challenge_method: 'S256' | 'plain';
+};
+
+type AuthorizationFormValues = AuthorizationRequestValues & {
+  token: string;
+};
+
+function normalizeCodeChallengeMethod(method?: string | null): 'S256' | 'plain' {
+  if (!method) {
+    return 'S256';
+  }
+  const trimmed = method.trim();
+  if (!trimmed) {
+    return 'S256';
+  }
+  const upper = trimmed.toUpperCase();
+  if (upper === 'S256') {
+    return 'S256';
+  }
+  if (upper === 'PLAIN') {
+    return 'plain';
+  }
+  throw new Error('Unsupported code_challenge_method');
+}
+
+function ensureAuthorizationRequestValues(
+  input: z.infer<typeof authorizeQuerySchema>,
+): AuthorizationRequestValues {
+  return {
+    ...input,
+    code_challenge_method: normalizeCodeChallengeMethod(input.code_challenge_method),
+  };
+}
+
+function ensureAuthorizationFormValues(
+  input: z.infer<typeof authorizeFormSchema>,
+): AuthorizationFormValues {
+  const base = ensureAuthorizationRequestValues(input);
+  return {
+    ...base,
+    token: input.token,
+  };
+}
+
+function buildFallbackAuthorizationValues(raw: {
+  client_id?: string;
+  redirect_uri?: string;
+  state?: string;
+  scope?: string;
+  code_challenge?: string;
+  code_challenge_method?: string;
+}): AuthorizationRequestValues {
+  let method: 'S256' | 'plain';
+  try {
+    method = normalizeCodeChallengeMethod(raw.code_challenge_method);
+  } catch {
+    method = 'S256';
+  }
+  return {
+    response_type: 'code',
+    client_id: raw.client_id ?? '',
+    redirect_uri: raw.redirect_uri ?? '',
+    state: raw.state,
+    scope: raw.scope,
+    code_challenge: raw.code_challenge ?? '',
+    code_challenge_method: method,
+  };
+}
+
 function renderAuthorizePage(params: {
-  values: z.infer<typeof authorizeQuerySchema>;
+  values: AuthorizationRequestValues;
   error?: string;
 }): string {
   const { values, error } = params;
   const hiddenInputs = Object.entries(values)
+    .filter(([, value]) => value !== undefined)
     .map(([key, value]) =>
       `<input type="hidden" name="${key}" value="${String(value)}" />`,
     )
@@ -1629,7 +1703,7 @@ app.get(oauthMetadataPaths, (req: Request, res: ExpressResponse) => {
     registration_endpoint: `${issuer}/register`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256'],
+    code_challenge_methods_supported: ['S256', 'plain'],
     token_endpoint_auth_methods_supported: ['none'],
     scopes_supported: ['refmd.read', 'refmd.write'],
   });
@@ -1650,7 +1724,7 @@ app.get(openidConfigurationPaths, (req: Request, res: ExpressResponse) => {
     revocation_endpoint: `${issuer}/oauth/revoke`,
     response_types_supported: ['code'],
     grant_types_supported: ['authorization_code', 'refresh_token'],
-    code_challenge_methods_supported: ['S256'],
+    code_challenge_methods_supported: ['S256', 'plain'],
     token_endpoint_auth_methods_supported: ['none'],
     scopes_supported: ['refmd.read', 'refmd.write'],
   });
@@ -1664,7 +1738,7 @@ app.get('/oauth/authorize', (req: Request, res: ExpressResponse) => {
     state: firstString(req.query.state),
     scope: firstString(req.query.scope),
     code_challenge: firstString(req.query.code_challenge),
-    code_challenge_method: firstString(req.query.code_challenge_method)?.toUpperCase(),
+    code_challenge_method: firstString(req.query.code_challenge_method),
   });
 
   if (!parsed.success) {
@@ -1672,9 +1746,10 @@ app.get('/oauth/authorize', (req: Request, res: ExpressResponse) => {
     return;
   }
 
-  const values = parsed.data;
-  const method = values.code_challenge_method.toUpperCase() as 'S256' | 'plain';
-  if (method !== 'S256') {
+  let values: AuthorizationRequestValues;
+  try {
+    values = ensureAuthorizationRequestValues(parsed.data);
+  } catch {
     res.status(400).send('Unsupported code_challenge_method');
     return;
   }
@@ -1689,7 +1764,7 @@ app.get('/oauth/authorize', (req: Request, res: ExpressResponse) => {
     .status(200)
     .send(
       renderAuthorizePage({
-        values: { ...values, code_challenge_method: 'S256' },
+        values,
       }),
     );
 });
@@ -1702,7 +1777,7 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
     state: req.body?.state,
     scope: req.body?.scope,
     code_challenge: req.body?.code_challenge,
-    code_challenge_method: (req.body?.code_challenge_method ?? '').toUpperCase(),
+    code_challenge_method: req.body?.code_challenge_method,
     token: req.body?.token,
   });
 
@@ -1714,31 +1789,53 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
       state: req.body?.state,
       scope: req.body?.scope,
       code_challenge: req.body?.code_challenge,
-      code_challenge_method: (req.body?.code_challenge_method ?? '').toUpperCase(),
+      code_challenge_method: req.body?.code_challenge_method,
     });
-    const values = fallback.success
-      ? { ...fallback.data, code_challenge_method: 'S256' as const }
-      : {
-          response_type: 'code' as const,
-          client_id: req.body?.client_id ?? '',
-          redirect_uri: req.body?.redirect_uri ?? '',
-          state: req.body?.state,
-          scope: req.body?.scope,
-          code_challenge: req.body?.code_challenge ?? '',
-          code_challenge_method: 'S256' as const,
-        };
+    const values =
+      fallback.success
+        ? (() => {
+            try {
+              return ensureAuthorizationRequestValues(fallback.data);
+            } catch {
+              return buildFallbackAuthorizationValues({
+                client_id: fallback.data.client_id,
+                redirect_uri: fallback.data.redirect_uri,
+                state: fallback.data.state,
+                scope: fallback.data.scope,
+                code_challenge: fallback.data.code_challenge,
+                code_challenge_method: fallback.data.code_challenge_method,
+              });
+            }
+          })()
+        : buildFallbackAuthorizationValues({
+            client_id: req.body?.client_id,
+            redirect_uri: req.body?.redirect_uri,
+            state: req.body?.state,
+            scope: req.body?.scope,
+            code_challenge: req.body?.code_challenge,
+            code_challenge_method: req.body?.code_challenge_method,
+          });
     res.status(400).send(renderAuthorizePage({ values, error: 'Invalid submission' }));
     return;
   }
 
-  const values = parsed.data;
-  if (values.code_challenge_method.toUpperCase() !== 'S256') {
+  let values: AuthorizationFormValues;
+  try {
+    values = ensureAuthorizationFormValues(parsed.data);
+  } catch {
     res
       .status(400)
       .send(
         renderAuthorizePage({
-          values: { ...values, code_challenge_method: 'S256' },
-          error: 'Only S256 PKCE is supported',
+          values: buildFallbackAuthorizationValues({
+            client_id: parsed.data.client_id,
+            redirect_uri: parsed.data.redirect_uri,
+            state: parsed.data.state,
+            scope: parsed.data.scope,
+            code_challenge: parsed.data.code_challenge,
+            code_challenge_method: parsed.data.code_challenge_method,
+          }),
+          error: 'Unsupported code_challenge_method',
         }),
       );
     return;
@@ -1750,7 +1847,7 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
       .status(400)
       .send(
         renderAuthorizePage({
-          values: { ...values, code_challenge_method: 'S256' },
+          values,
           error: validation.error ?? 'Client not allowed',
         }),
       );
@@ -1765,7 +1862,7 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
       clientId: values.client_id,
       redirectUri: values.redirect_uri,
       codeChallenge: values.code_challenge,
-      codeChallengeMethod: 'S256',
+      codeChallengeMethod: values.code_challenge_method,
       refmdToken: values.token,
       user,
       scope,
@@ -1784,10 +1881,11 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
       .status(401)
       .send(
         renderAuthorizePage({
-          values: { ...values, code_challenge_method: 'S256' },
+          values,
           error: 'Failed to verify RefMD token. Please try again.',
         }),
       );
+    return;
   }
 });
 
@@ -1823,8 +1921,18 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
       return;
     }
 
-    const computed = hashCodeVerifier(body.code_verifier);
-    if (record.codeChallengeMethod === 'S256' && computed !== record.codeChallenge) {
+    if (record.codeChallengeMethod === 'S256') {
+      const computed = hashCodeVerifier(body.code_verifier);
+      if (computed !== record.codeChallenge) {
+        res.status(400).json({ error: 'invalid_grant' });
+        return;
+      }
+    } else if (record.codeChallengeMethod === 'plain') {
+      if (body.code_verifier !== record.codeChallenge) {
+        res.status(400).json({ error: 'invalid_grant' });
+        return;
+      }
+    } else {
       res.status(400).json({ error: 'invalid_grant' });
       return;
     }
