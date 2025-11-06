@@ -1,0 +1,22 @@
+# Install / build artifacts
+node_modules/
+dist/
+*.log
+
+# Local data & environment
+.env
+.env.*
+data/
+
+# Tooling caches
+.npm/
+.pnpm-store/
+.yarn/
+.turbo/
+.nyc_output/
+coverage/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp

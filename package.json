@@ -1,0 +1,44 @@
+{
+  "name": "@refmdio/mcp-server",
+  "version": "0.1.0",
+  "description": "Model Context Protocol server exposing RefMD document operations.",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "refmd-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.21.0",
+    "express": "^4.21.2",
+    "kysely": "^0.27.4",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.25",
+    "@types/node": "^20.19.24",
+    "tsx": "^4.7.0",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "better-sqlite3": "^9.0.0",
+    "mysql2": "^3.11.0",
+    "pg": "^8.13.1"
+  },
+  "peerDependenciesMeta": {
+    "better-sqlite3": {
+      "optional": true
+    },
+    "mysql2": {
+      "optional": true
+    },
+    "pg": {
+      "optional": true
+    }
+  }
+}
