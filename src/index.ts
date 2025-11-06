@@ -740,6 +740,39 @@ function sendUnauthorized(res: ExpressResponse, message = 'invalid_token'): void
     .json({ error: message });
 }
 
+const REQUIRED_STREAMABLE_ACCEPT_TYPES = ['application/json', 'text/event-stream'];
+
+function normalizeAcceptHeaderForStreamableTransport(req: Request): void {
+  const rawHeader = req.headers.accept;
+  if (!rawHeader) {
+    req.headers.accept = REQUIRED_STREAMABLE_ACCEPT_TYPES.join(', ');
+    return;
+  }
+
+  const values: string[] = Array.isArray(rawHeader)
+    ? rawHeader.flatMap((value) => value.split(','))
+    : rawHeader.split(',');
+
+  const seen = new Map<string, string>();
+  for (const value of values) {
+    const trimmed = value.trim();
+    if (!trimmed) continue;
+    const lower = trimmed.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.set(lower, trimmed);
+    }
+  }
+
+  for (const required of REQUIRED_STREAMABLE_ACCEPT_TYPES) {
+    const lower = required.toLowerCase();
+    if (!seen.has(lower)) {
+      seen.set(lower, required);
+    }
+  }
+
+  req.headers.accept = Array.from(seen.values()).join(', ');
+}
+
 function firstString(value: unknown): string | undefined {
   if (typeof value === 'string') return value;
   if (Array.isArray(value) && value.length > 0 && typeof value[0] === 'string') {
@@ -1827,6 +1860,8 @@ app.post('/mcp', async (req: Request, res: ExpressResponse) => {
     sessionIdGenerator: undefined,
     enableJsonResponse: true,
   });
+
+  normalizeAcceptHeaderForStreamableTransport(req);
 
   res.on('close', () => {
     void transport.close();
