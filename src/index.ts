@@ -779,11 +779,47 @@ async function pruneAccessTokensByRefresh(refreshToken: string): Promise<void> {
 }
 
 async function getAccessTokenRecord(token: string): Promise<StoredAccessToken | null> {
-  return tokenStore.getAccessToken(token);
+  const record = await tokenStore.getAccessToken(token);
+  if (!record) {
+    return null;
+  }
+  if (record.expiresAt > Date.now()) {
+    return record;
+  }
+  const refreshToken = record.refreshToken;
+  if (!refreshToken) {
+    await tokenStore.deleteAccessToken(token);
+    return null;
+  }
+  const refreshRecord = await tokenStore.getRefreshToken(refreshToken);
+  if (!refreshRecord) {
+    await tokenStore.deleteAccessToken(token);
+    return null;
+  }
+  if (refreshRecord.expiresAt <= Date.now()) {
+    await tokenStore.deleteAccessToken(token);
+    await tokenStore.deleteRefreshToken(refreshRecord.refreshToken);
+    return null;
+  }
+  const renewed: StoredAccessToken = {
+    ...record,
+    expiresAt: Date.now() + ACCESS_TOKEN_TTL_MS,
+  };
+  await tokenStore.saveAccessToken(renewed);
+  return renewed;
 }
 
 async function getRefreshTokenRecord(token: string): Promise<StoredRefreshToken | null> {
-  return tokenStore.getRefreshToken(token);
+  const record = await tokenStore.getRefreshToken(token);
+  if (!record) {
+    return null;
+  }
+  if (record.expiresAt > Date.now()) {
+    return record;
+  }
+  await tokenStore.deleteRefreshToken(token);
+  await tokenStore.deleteAccessTokensByRefreshToken(token);
+  return null;
 }
 
 function extractBearerToken(req: Request): string | null {

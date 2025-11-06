@@ -103,12 +103,7 @@ class InMemoryTokenStore implements TokenStore {
 
   async getAccessToken(token: string): Promise<StoredAccessToken | null> {
     const record = this.accessTokens.get(token);
-    if (!record) return null;
-    if (record.expiresAt <= Date.now()) {
-      this.accessTokens.delete(token);
-      return null;
-    }
-    return record;
+    return record ?? null;
   }
 
   async deleteAccessToken(token: string): Promise<void> {
@@ -121,12 +116,7 @@ class InMemoryTokenStore implements TokenStore {
 
   async getRefreshToken(token: string): Promise<StoredRefreshToken | null> {
     const record = this.refreshTokens.get(token);
-    if (!record) return null;
-    if (record.expiresAt <= Date.now()) {
-      this.refreshTokens.delete(token);
-      return null;
-    }
-    return record;
+    return record ?? null;
   }
 
   async deleteRefreshToken(token: string): Promise<void> {
@@ -230,10 +220,6 @@ class KyselyTokenStore implements TokenStore {
       .where('access_token', '=', token)
       .executeTakeFirst();
     if (!row) return null;
-    if (row.expires_at <= Date.now()) {
-      await this.deleteAccessToken(token);
-      return null;
-    }
     return {
       accessToken: row.access_token,
       clientId: row.client_id,
@@ -277,10 +263,6 @@ class KyselyTokenStore implements TokenStore {
       .where('refresh_token', '=', token)
       .executeTakeFirst();
     if (!row) return null;
-    if (row.expires_at <= Date.now()) {
-      await this.deleteRefreshToken(token);
-      return null;
-    }
     return {
       refreshToken: row.refresh_token,
       clientId: row.client_id,
