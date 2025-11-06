@@ -28,7 +28,7 @@ The server now authenticates users via OAuth 2.1 with PKCE. Configure it with th
 | `REFRESH_TOKEN_TTL_SECONDS` | Optional refresh-token lifetime (default `2592000`, i.e. 30 days). |
 | `MCP_DB_DRIVER` | Optional. Set to `sqlite`, `postgres`, or `mysql` to persist OAuth tokens. Defaults to in-memory storage. |
 | `MCP_DB_URL` | Optional connection string for the configured driver (e.g. `postgres://user:pass@host/db`). For SQLite you may omit this and use `MCP_DB_SQLITE_PATH`. |
-| `MCP_DB_SQLITE_PATH` | Optional filesystem path for SQLite storage (defaults to `./data/refmd-mcp.sqlite`). Accepts plain paths or `file:///` URLs. |
+| `MCP_DB_SQLITE_PATH` | Optional filesystem path for SQLite storage (defaults to `./data/refmd-mcp.sqlite`). Accepts plain paths or `file:///` URLs; ensure the path resolves to persistent storage when using SQLite. |
 | `PORT` / `HOST` | Optional listen port / host (defaults: `3334` / `0.0.0.0`). |
 
 > ℹ️ Install the appropriate database driver when enabling persistence:  
@@ -82,8 +82,11 @@ docker run -p 3334:3334 \
   -e OAUTH_ALLOWED_REDIRECTS="https://chat.openai.com/aip/mcp/oauth/callback" \
   -e MCP_DB_DRIVER="sqlite" \
   -e MCP_DB_SQLITE_PATH="/data/refmd-mcp.sqlite" \
+  -v refmd-mcp-data:/data \
   refmd-mcp
 ```
+
+Mount a persistent volume (as shown above) so the SQLite database file survives container restarts.
 
 ## Connecting a Chat Client
 
