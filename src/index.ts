@@ -22,6 +22,26 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
 app.use((req: Request, res: ExpressResponse, next: NextFunction) => {
+  const start = Date.now();
+  const firstForwardedFor = req.headers['x-forwarded-for'];
+  const clientIp = Array.isArray(firstForwardedFor)
+    ? firstForwardedFor[0]
+    : firstForwardedFor
+        ?.split(',')
+        .map((value) => value.trim())
+        .find((value) => value.length > 0);
+  const remote = clientIp || req.socket.remoteAddress || '-';
+  console.log(`[request] ${remote} ${req.method} ${req.originalUrl}`);
+  res.on('finish', () => {
+    const duration = Date.now() - start;
+    console.log(
+      `[response] ${remote} ${req.method} ${req.originalUrl} -> ${res.statusCode} (${duration}ms)`,
+    );
+  });
+  next();
+});
+
+app.use((req: Request, res: ExpressResponse, next: NextFunction) => {
   res.header('Access-Control-Allow-Origin', '*');
   res.header(
     'Access-Control-Allow-Headers',
