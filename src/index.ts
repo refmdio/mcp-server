@@ -653,6 +653,9 @@ if (normalizedDriver) {
 const allowedClientIdSet = new Set(allowedClientIds);
 const allowedRedirectSet = new Set(allowedRedirects);
 const registeredClients = new Map<string, Set<string>>();
+const SUPPORTED_SCOPES = ['refmd.read', 'refmd.write'] as const;
+const SUPPORTED_SCOPE_STRING = SUPPORTED_SCOPES.join(' ');
+const OAUTH_PROTECTED_RESOURCE_BASE_PATH = '/.well-known/oauth-protected-resource';
 
 function randomToken(bytes = 32): string {
   return crypto.randomBytes(bytes).toString('base64url');
@@ -830,11 +833,58 @@ function extractBearerToken(req: Request): string | null {
   return match[1].trim();
 }
 
-function sendUnauthorized(res: ExpressResponse, message = 'invalid_token'): void {
-  res
-    .status(401)
-    .set('WWW-Authenticate', 'Bearer realm="refmd-mcp", error="' + message + '"')
-    .json({ error: message });
+type ResourceMetadataInfo = {
+  issuer: string;
+  resourcePath: string;
+  resource: string;
+  metadataPath: string;
+  metadataUrl: string;
+};
+
+function normalizeResourcePath(path?: string | null): string {
+  if (!path) return '';
+  const trimmed = path.trim();
+  if (trimmed === '' || trimmed === '/') {
+    return '';
+  }
+  const ensured = trimmed.startsWith('/') ? trimmed : `/${trimmed}`;
+  const withoutTrailing = ensured.replace(/\/+$/, '');
+  return withoutTrailing === '/' ? '' : withoutTrailing;
+}
+
+function buildResourceMetadataInfo(req: Request, resourcePathOverride?: string): ResourceMetadataInfo {
+  const resourcePath = normalizeResourcePath(resourcePathOverride ?? req.path);
+  const issuer = issuerFromRequest(req);
+  const metadataPath =
+    resourcePath.length > 0
+      ? `${OAUTH_PROTECTED_RESOURCE_BASE_PATH}${resourcePath}`
+      : OAUTH_PROTECTED_RESOURCE_BASE_PATH;
+  const metadataUrl = `${issuer}${metadataPath}`;
+  const resource = resourcePath.length > 0 ? `${issuer}${resourcePath}` : issuer;
+  return { issuer, resourcePath, resource, metadataPath, metadataUrl };
+}
+
+function resolveResourcePathFromMetadataRequest(path: string): string {
+  if (path.startsWith('/mcp/.well-known/oauth-protected-resource')) {
+    const suffix = path.slice('/mcp/.well-known/oauth-protected-resource'.length);
+    const normalizedSuffix = normalizeResourcePath(suffix);
+    return normalizedSuffix ? `/mcp${normalizedSuffix}` : '/mcp';
+  }
+  const suffix = path.slice(OAUTH_PROTECTED_RESOURCE_BASE_PATH.length);
+  return normalizeResourcePath(suffix);
+}
+
+function sendUnauthorized(req: Request, res: ExpressResponse, message = 'invalid_token'): void {
+  const { metadataUrl } = buildResourceMetadataInfo(req);
+  const challengeParts = [
+    'Bearer realm="refmd-mcp"',
+    `error="${message}"`,
+    `scope="${SUPPORTED_SCOPE_STRING}"`,
+  ];
+  if (metadataUrl) {
+    challengeParts.push(`resource_metadata="${metadataUrl}"`);
+  }
+  res.status(401).set('WWW-Authenticate', challengeParts.join(', ')).json({ error: message });
 }
 
 const REQUIRED_STREAMABLE_ACCEPT_TYPES = ['application/json', 'text/event-stream'];
@@ -1687,6 +1737,13 @@ const oauthMetadataPaths = [
   '/mcp/.well-known/oauth-authorization-server',
 ];
 
+const oauthProtectedResourcePaths = [
+  '/.well-known/oauth-protected-resource',
+  '/.well-known/oauth-protected-resource/*',
+  '/mcp/.well-known/oauth-protected-resource',
+  '/mcp/.well-known/oauth-protected-resource/*',
+];
+
 app.post('/register', (req: Request, res: ExpressResponse) => {
   const parsed = clientRegistrationSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
@@ -1779,7 +1836,19 @@ app.get(oauthMetadataPaths, (req: Request, res: ExpressResponse) => {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256', 'plain'],
     token_endpoint_auth_methods_supported: ['none'],
-    scopes_supported: ['refmd.read', 'refmd.write'],
+    scopes_supported: SUPPORTED_SCOPES,
+  });
+});
+
+app.get(oauthProtectedResourcePaths, (req: Request, res: ExpressResponse) => {
+  const resourcePath = resolveResourcePathFromMetadataRequest(req.path);
+  const info = buildResourceMetadataInfo(req, resourcePath);
+  res.json({
+    resource: info.resource,
+    resource_name: 'RefMD MCP',
+    authorization_servers: [info.issuer],
+    scopes_supported: SUPPORTED_SCOPES,
+    bearer_methods_supported: ['authorization_header'],
   });
 });
 
@@ -1800,7 +1869,7 @@ app.get(openidConfigurationPaths, (req: Request, res: ExpressResponse) => {
     grant_types_supported: ['authorization_code', 'refresh_token'],
     code_challenge_methods_supported: ['S256', 'plain'],
     token_endpoint_auth_methods_supported: ['none'],
-    scopes_supported: ['refmd.read', 'refmd.write'],
+    scopes_supported: SUPPORTED_SCOPES,
   });
 });
 
@@ -2097,12 +2166,12 @@ app.get('/sse', async (req: Request, res: ExpressResponse) => {
   try {
     const bearer = extractBearerToken(req);
     if (!bearer) {
-      sendUnauthorized(res);
+      sendUnauthorized(req, res);
       return;
     }
     const tokenRecord = await getAccessTokenRecord(bearer);
     if (!tokenRecord) {
-      sendUnauthorized(res);
+      sendUnauthorized(req, res);
       return;
     }
 
@@ -2152,7 +2221,7 @@ app.post('/sse/messages', async (req: Request, res: ExpressResponse) => {
   const tokenRecord = await getAccessTokenRecord(session.accessToken);
   if (!tokenRecord) {
     sessions.delete(sessionId);
-    sendUnauthorized(res);
+    sendUnauthorized(req, res);
     session.transport.close().catch(() => {});
     session.server.close().catch(() => {});
     return;
@@ -2171,12 +2240,12 @@ app.post('/sse/messages', async (req: Request, res: ExpressResponse) => {
 app.post('/mcp', async (req: Request, res: ExpressResponse) => {
   const bearer = extractBearerToken(req);
   if (!bearer) {
-    sendUnauthorized(res);
+    sendUnauthorized(req, res);
     return;
   }
   const tokenRecord = await getAccessTokenRecord(bearer);
   if (!tokenRecord) {
-    sendUnauthorized(res);
+    sendUnauthorized(req, res);
     return;
   }
 

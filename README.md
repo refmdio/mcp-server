@@ -31,6 +31,10 @@ The server now authenticates users via OAuth 2.1 with PKCE. Configure it with th
 | `MCP_DB_SQLITE_PATH` | Optional filesystem path for SQLite storage (defaults to `./data/refmd-mcp.sqlite`). Accepts plain paths or `file:///` URLs; ensure the path resolves to persistent storage when using SQLite. |
 | `PORT` / `HOST` | Optional listen port / host (defaults: `3334` / `0.0.0.0`). |
 
+> Allowing multiple hosted clients: set `OAUTH_CLIENT_IDS` to a comma-separated list (e.g. `chatgpt-connector,Claude`) and mirror the same set in `OAUTH_ALLOWED_REDIRECTS`. Leaving either variable empty keeps it open to any HTTPS redirect, but as soon as you specify one value you must list every connector you want to permit.
+
+> Remote MCP clients (Claude Web included) expect the OAuth Protected Resource Metadata document at `https://<host>/.well-known/oauth-protected-resource` so they can follow the `resource_metadata` hint in `WWW-Authenticate` challenges. The server serves that document automatically (including mirrored aliases like `/mcp/.well-known/...`), so make sure your reverse proxy forwards those paths.
+
 > ℹ️ Install the appropriate database driver when enabling persistence:  
 > `npm install better-sqlite3` for SQLite, `npm install pg` for PostgreSQL, or `npm install mysql2` for MySQL/MariaDB.
 
