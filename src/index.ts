@@ -1953,7 +1953,7 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
   const responseTypes = ['code'];
 
   const tokenEndpointAuthMethod = (payload.token_endpoint_auth_method ?? 'none').toLowerCase();
-  if (tokenEndpointAuthMethod !== 'none') {
+  if (tokenEndpointAuthMethod !== 'none' && tokenEndpointAuthMethod !== 'client_secret_post') {
     logRegisterError(
       req,
       `unsupported token_endpoint_auth_method: ${tokenEndpointAuthMethod}`,
