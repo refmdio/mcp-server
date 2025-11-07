@@ -676,15 +676,7 @@ function rememberClientRegistration(clientId: string, redirectUris: string[]): v
   const redirectSet = registeredClients.get(clientId)!;
   for (const uri of redirectUris) {
     redirectSet.add(uri);
-    if (allowedRedirectSet.size === 0) {
-      continue;
-    }
-    if (allowedRedirectSet.has(uri)) {
-      continue;
-    }
-    allowedRedirectSet.add(uri);
   }
-  allowedClientIdSet.add(clientId);
 }
 
 function isClientAllowed(clientId: string): boolean {
