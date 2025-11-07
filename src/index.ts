@@ -21,16 +21,61 @@ app.disable('x-powered-by');
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
+function getClientIp(req: Request): string {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim() !== '') {
+    const first = forwarded
+      .split(',')
+      .map((value) => value.trim())
+      .find((value) => value.length > 0);
+    if (first) {
+      return first;
+    }
+  } else if (Array.isArray(forwarded) && forwarded.length > 0) {
+    const first = forwarded
+      .map((value) => value.trim())
+      .find((value) => value.length > 0);
+    if (first) {
+      return first;
+    }
+  }
+  return req.socket.remoteAddress ?? '-';
+}
+
+type LogFields = Record<string, unknown>;
+type LogLevel = 'info' | 'warn' | 'error';
+
+function logWithLevel(level: LogLevel, req: Request, message: string, fields?: LogFields): void {
+  const consoleMethod =
+    level === 'error' ? console.error : level === 'warn' ? console.warn : console.log;
+  const context = `${req.method} ${req.originalUrl} from ${getClientIp(req)}`;
+  if (fields) {
+    consoleMethod(`[${level}] ${message} — ${context}`, fields);
+  } else {
+    consoleMethod(`[${level}] ${message} — ${context}`);
+  }
+}
+
+const logInfo = (req: Request, message: string, fields?: LogFields): void =>
+  logWithLevel('info', req, message, fields);
+const logWarn = (req: Request, message: string, fields?: LogFields): void =>
+  logWithLevel('warn', req, message, fields);
+const logError = (req: Request, message: string, fields?: LogFields): void =>
+  logWithLevel('error', req, message, fields);
+
+function maskSecret(value?: string | null): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (!trimmed) return undefined;
+  if (trimmed.length <= 8) {
+    return `${trimmed.slice(0, 2)}…`;
+  }
+  return `${trimmed.slice(0, 4)}…${trimmed.slice(-4)}`;
+}
+
 app.use((req: Request, res: ExpressResponse, next: NextFunction) => {
   const start = Date.now();
-  const firstForwardedFor = req.headers['x-forwarded-for'];
-  const clientIp = Array.isArray(firstForwardedFor)
-    ? firstForwardedFor[0]
-    : firstForwardedFor
-        ?.split(',')
-        .map((value) => value.trim())
-        .find((value) => value.length > 0);
-  const remote = clientIp || req.socket.remoteAddress || '-';
+  const remote = getClientIp(req);
   console.log(`[request] ${remote} ${req.method} ${req.originalUrl}`);
   res.on('finish', () => {
     const duration = Date.now() - start;
@@ -887,6 +932,7 @@ function resolveResourcePathFromMetadataRequest(path: string): string {
 }
 
 function sendUnauthorized(req: Request, res: ExpressResponse, message = 'invalid_token'): void {
+  logWarn(req, 'unauthorized request', { error: message });
   const { metadataUrl } = buildResourceMetadataInfo(req);
   const challengeParts = [
     'Bearer realm="refmd-mcp"',
@@ -1859,6 +1905,7 @@ const oauthProtectedResourcePaths = [
 app.post('/register', (req: Request, res: ExpressResponse) => {
   const parsed = clientRegistrationSchema.safeParse(req.body ?? {});
   if (!parsed.success) {
+    logRegisterError(req, 'invalid_client_metadata (schema)', parsed.error.flatten());
     res.status(400).json({
       error: 'invalid_client_metadata',
       error_description: 'Invalid client registration payload.',
@@ -1874,6 +1921,7 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
     (value) => value !== 'authorization_code' && value !== 'refresh_token',
   );
   if (unsupportedGrantType) {
+    logRegisterError(req, `unsupported grant_type: ${unsupportedGrantType}`, payload);
     res.status(400).json({
       error: 'invalid_client_metadata',
       error_description: `Unsupported grant_type: ${unsupportedGrantType}`,
@@ -1881,6 +1929,7 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
     return;
   }
   if (!requestedGrantTypes.includes('authorization_code')) {
+    logRegisterError(req, 'authorization_code grant_type missing', payload);
     res.status(400).json({
       error: 'invalid_client_metadata',
       error_description: 'authorization_code grant_type is required',
@@ -1894,6 +1943,7 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
   const requestedResponseTypes = payload.response_types ?? ['code'];
   const unsupportedResponseType = requestedResponseTypes.find((value) => value !== 'code');
   if (unsupportedResponseType) {
+    logRegisterError(req, `unsupported response_type: ${unsupportedResponseType}`, payload);
     res.status(400).json({
       error: 'invalid_client_metadata',
       error_description: `Unsupported response_type: ${unsupportedResponseType}`,
@@ -1904,6 +1954,11 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
 
   const tokenEndpointAuthMethod = (payload.token_endpoint_auth_method ?? 'none').toLowerCase();
   if (tokenEndpointAuthMethod !== 'none') {
+    logRegisterError(
+      req,
+      `unsupported token_endpoint_auth_method: ${tokenEndpointAuthMethod}`,
+      payload,
+    );
     res.status(400).json({
       error: 'invalid_client_metadata',
       error_description: 'Only public clients (token_endpoint_auth_method "none") are supported',
@@ -1913,6 +1968,7 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
 
   for (const uri of redirectUris) {
     if (!isRedirectUriSafe(uri)) {
+      logRegisterError(req, `invalid_redirect_uri: ${uri}`, payload);
       res.status(400).json({
         error: 'invalid_redirect_uri',
         error_description: `Redirect URI not allowed: ${uri}`,
@@ -1923,6 +1979,12 @@ app.post('/register', (req: Request, res: ExpressResponse) => {
 
   const clientId = randomToken(24);
   rememberClientRegistration(clientId, redirectUris);
+  logInfo(req, 'client registered', {
+    clientId,
+    redirectUris,
+    grantTypes,
+    responseTypes,
+  });
 
   res.status(201).json({
     client_id: clientId,
@@ -1997,6 +2059,7 @@ app.get('/oauth/authorize', (req: Request, res: ExpressResponse) => {
   });
 
   if (!parsed.success) {
+    logWarn(req, 'authorize query validation failed', { issues: parsed.error.flatten() });
     res.status(400).send('Invalid authorization request');
     return;
   }
@@ -2005,15 +2068,27 @@ app.get('/oauth/authorize', (req: Request, res: ExpressResponse) => {
   try {
     values = ensureAuthorizationRequestValues(parsed.data);
   } catch {
+    logWarn(req, 'authorize query had unsupported code_challenge_method');
     res.status(400).send('Unsupported code_challenge_method');
     return;
   }
 
   const validation = validateClientAndRedirect(values.client_id, values.redirect_uri);
   if (!validation.ok) {
+    logWarn(req, 'authorize client validation failed', {
+      clientId: values.client_id,
+      redirectUri: values.redirect_uri,
+      error: validation.error,
+    });
     res.status(400).send(validation.error ?? 'invalid_client');
     return;
   }
+
+  logInfo(req, 'authorize consent page rendered', {
+    clientId: values.client_id,
+    redirectUri: values.redirect_uri,
+    scope: values.scope,
+  });
 
   res
     .status(200)
@@ -2037,6 +2112,11 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
   });
 
   if (!parsed.success) {
+    logWarn(req, 'authorize form validation failed', {
+      clientId: req.body?.client_id,
+      redirectUri: req.body?.redirect_uri,
+      issues: parsed.error.flatten(),
+    });
     const fallback = authorizeQuerySchema.safeParse({
       response_type: req.body?.response_type,
       client_id: req.body?.client_id,
@@ -2078,6 +2158,10 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
   try {
     values = ensureAuthorizationFormValues(parsed.data);
   } catch {
+    logWarn(req, 'authorize form had unsupported code_challenge_method', {
+      clientId: parsed.data.client_id,
+      redirectUri: parsed.data.redirect_uri,
+    });
     res
       .status(400)
       .send(
@@ -2098,6 +2182,11 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
 
   const validation = validateClientAndRedirect(values.client_id, values.redirect_uri);
   if (!validation.ok) {
+    logWarn(req, 'authorize form client validation failed', {
+      clientId: values.client_id,
+      redirectUri: values.redirect_uri,
+      error: validation.error,
+    });
     res
       .status(400)
       .send(
@@ -2129,9 +2218,18 @@ app.post('/oauth/authorize', async (req: Request, res: ExpressResponse) => {
     if (values.state) {
       redirect.searchParams.set('state', values.state);
     }
+    logInfo(req, 'issued authorization code', {
+      clientId: values.client_id,
+      userId: user.id,
+      scope,
+    });
     res.redirect(redirect.toString());
   } catch (error) {
-    console.error('Token validation failed:', error);
+    logError(req, 'RefMD token validation failed', {
+      clientId: values.client_id,
+      redirectUri: values.redirect_uri,
+      error: error instanceof Error ? error.message : String(error),
+    });
     res
       .status(401)
       .send(
@@ -2155,6 +2253,7 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
   });
 
   if (!parsed.success) {
+    logWarn(req, 'token request validation failed', { issues: parsed.error.flatten() });
     res.status(400).json({ error: 'invalid_request' });
     return;
   }
@@ -2162,16 +2261,28 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
   const body = parsed.data;
   if (body.grant_type === 'authorization_code') {
     if (!body.code || !body.code_verifier || !body.redirect_uri || !body.client_id) {
+      logWarn(req, 'token request missing authorization_code parameters', {
+        clientId: body.client_id,
+        redirectUri: body.redirect_uri,
+      });
       res.status(400).json({ error: 'invalid_request' });
       return;
     }
 
     const record = await consumeAuthorizationCode(body.code);
     if (!record) {
+      logWarn(req, 'authorization_code not found or expired', {
+        clientId: body.client_id,
+        code: maskSecret(body.code),
+      });
       res.status(400).json({ error: 'invalid_grant' });
       return;
     }
     if (record.clientId !== body.client_id || record.redirectUri !== body.redirect_uri) {
+      logWarn(req, 'authorization_code client mismatch', {
+        requestClient: body.client_id,
+        recordClient: record.clientId,
+      });
       res.status(400).json({ error: 'invalid_grant' });
       return;
     }
@@ -2179,15 +2290,20 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
     if (record.codeChallengeMethod === 'S256') {
       const computed = hashCodeVerifier(body.code_verifier);
       if (computed !== record.codeChallenge) {
+        logWarn(req, 'code_verifier mismatch (S256)', { clientId: body.client_id });
         res.status(400).json({ error: 'invalid_grant' });
         return;
       }
     } else if (record.codeChallengeMethod === 'plain') {
       if (body.code_verifier !== record.codeChallenge) {
+        logWarn(req, 'code_verifier mismatch (plain)', { clientId: body.client_id });
         res.status(400).json({ error: 'invalid_grant' });
         return;
       }
     } else {
+      logWarn(req, 'authorization_code had unsupported codeChallengeMethod', {
+        method: record.codeChallengeMethod,
+      });
       res.status(400).json({ error: 'invalid_grant' });
       return;
     }
@@ -2200,6 +2316,11 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
       generateRefresh: true,
     });
 
+    logInfo(req, 'issued tokens via authorization_code', {
+      clientId: record.clientId,
+      userId: record.user.id,
+      scope: record.scope,
+    });
     res
       .status(200)
       .set('Cache-Control', 'no-store')
@@ -2216,11 +2337,17 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
 
   if (body.grant_type === 'refresh_token') {
     if (!body.refresh_token || !body.client_id) {
+      logWarn(req, 'token request missing refresh_token parameters', {
+        clientId: body.client_id,
+      });
       res.status(400).json({ error: 'invalid_request' });
       return;
     }
     const record = await getRefreshTokenRecord(body.refresh_token);
     if (!record || record.clientId !== body.client_id) {
+      logWarn(req, 'refresh_token invalid or client mismatch', {
+        clientId: body.client_id,
+      });
       res.status(400).json({ error: 'invalid_grant' });
       return;
     }
@@ -2235,6 +2362,11 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
       generateRefresh: true,
     });
 
+    logInfo(req, 'issued tokens via refresh_token', {
+      clientId: record.clientId,
+      userId: record.user.id,
+      scope: record.scope,
+    });
     res
       .status(200)
       .set('Cache-Control', 'no-store')
@@ -2249,12 +2381,14 @@ app.post('/oauth/token', async (req: Request, res: ExpressResponse) => {
     return;
   }
 
+  logWarn(req, 'unsupported grant_type', { grantType: body.grant_type });
   res.status(400).json({ error: 'unsupported_grant_type' });
 });
 
 app.post('/oauth/revoke', async (req: Request, res: ExpressResponse) => {
   const token = firstString(req.body?.token);
   if (!token) {
+    logWarn(req, 'revoke request missing token');
     res.status(400).json({ error: 'invalid_request' });
     return;
   }
@@ -2271,6 +2405,11 @@ app.post('/oauth/revoke', async (req: Request, res: ExpressResponse) => {
     await pruneAccessTokensByRefresh(token);
     await tokenStore.deleteRefreshToken(token);
   }
+  logInfo(req, 'token revoked', {
+    tokenHint: maskSecret(token),
+    revokedAccess: Boolean(accessRecord),
+    revokedRefresh: Boolean(refreshRecord),
+  });
   res.status(200).send();
 });
 
@@ -2293,6 +2432,11 @@ app.get('/sse', async (req: Request, res: ExpressResponse) => {
 
     const sessionId = transport.sessionId;
     sessions.set(sessionId, { transport, server, client, accessToken: bearer });
+    logInfo(req, 'SSE session established', {
+      sessionId,
+      clientId: tokenRecord.clientId,
+      userId: tokenRecord.user.id,
+    });
 
     res.on('close', () => {
       sessions.delete(sessionId);
@@ -2302,7 +2446,9 @@ app.get('/sse', async (req: Request, res: ExpressResponse) => {
 
     await server.connect(transport);
   } catch (error) {
-    console.error('Failed to establish SSE connection:', error);
+    logError(req, 'Failed to establish SSE connection', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (!res.headersSent) {
       res.status(500).send('Failed to establish SSE connection');
     } else {
@@ -2320,12 +2466,14 @@ app.post('/sse/messages', async (req: Request, res: ExpressResponse) => {
         ? rawSession[0]
         : undefined;
   if (!sessionId) {
+    logWarn(req, 'SSE message missing sessionId');
     res.status(400).send('Missing sessionId query parameter.');
     return;
   }
 
   const session = sessions.get(sessionId);
   if (!session) {
+    logWarn(req, 'SSE session not found', { sessionId });
     res.status(404).send('Unknown session.');
     return;
   }
@@ -2342,7 +2490,10 @@ app.post('/sse/messages', async (req: Request, res: ExpressResponse) => {
   try {
     await session.transport.handlePostMessage(req, res, req.body);
   } catch (error) {
-    console.error('Failed to handle POST message:', error);
+    logError(req, 'Failed to handle SSE POST message', {
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (!res.headersSent) {
       res.status(500).send('Failed to handle message');
     }
@@ -2377,9 +2528,15 @@ app.post('/mcp', async (req: Request, res: ExpressResponse) => {
 
   try {
     await server.connect(transport);
+    logInfo(req, 'Streamable MCP request handled', {
+      clientId: tokenRecord.clientId,
+      userId: tokenRecord.user.id,
+    });
     await transport.handleRequest(req, res, req.body);
   } catch (error) {
-    console.error('Failed to handle /mcp request:', error);
+    logError(req, 'Failed to handle /mcp request', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (!res.headersSent) {
       res.status(500).send('Failed to process MCP request');
     }
@@ -2406,3 +2563,7 @@ process.on('SIGINT', () => {
   });
   process.exit(0);
 });
+function logRegisterError(req: Request, reason: string, payload?: unknown): void {
+  const fields = payload ? { payload } : undefined;
+  logWarn(req, `register failed: ${reason}`, fields);
+}
