@@ -952,12 +952,112 @@ function deriveScopes(scopeParam?: string): string[] {
   return scopes;
 }
 
+type ForwardedHeaderValues = {
+  proto?: string;
+  host?: string;
+};
+
+function firstHeaderValue(headerValue?: string | null): string | undefined {
+  if (!headerValue) {
+    return undefined;
+  }
+  const [first] = headerValue.split(',');
+  const trimmed = first?.trim();
+  return trimmed && trimmed.length > 0 ? trimmed : undefined;
+}
+
+function stripQuotes(value: string): string {
+  if (value.startsWith('"') && value.endsWith('"') && value.length >= 2) {
+    return value.slice(1, -1);
+  }
+  return value;
+}
+
+function parseForwardedHeader(headerValue?: string | null): ForwardedHeaderValues {
+  const first = firstHeaderValue(headerValue);
+  if (!first) {
+    return {};
+  }
+  const pairs = first.split(';');
+  const result: ForwardedHeaderValues = {};
+  for (const pair of pairs) {
+    const [rawKey, rawValue] = pair.split('=');
+    if (!rawValue) continue;
+    const key = rawKey.trim().toLowerCase();
+    const value = stripQuotes(rawValue.trim());
+    if (!value) continue;
+    if (key === 'proto') {
+      result.proto = value;
+    } else if (key === 'host') {
+      result.host = value;
+    }
+  }
+  return result;
+}
+
+function parseCfVisitorScheme(headerValue?: string | null): string | undefined {
+  if (!headerValue) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(headerValue) as { scheme?: string };
+    if (typeof parsed.scheme === 'string') {
+      return parsed.scheme;
+    }
+  } catch {
+    // ignore parse errors
+  }
+  return undefined;
+}
+
+function sanitizeScheme(value?: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'https' || normalized === 'http') {
+    return normalized;
+  }
+  return undefined;
+}
+
+function sanitizeHost(value?: string): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  return trimmed;
+}
+
+function determineOriginalScheme(req: Request): string {
+  const forwarded = parseForwardedHeader(req.get('forwarded'));
+  return (
+    sanitizeScheme(forwarded.proto) ??
+    sanitizeScheme(parseCfVisitorScheme(req.get('cf-visitor'))) ??
+    sanitizeScheme(firstHeaderValue(req.get('x-forwarded-proto'))) ??
+    (req.secure || req.protocol === 'https' ? 'https' : 'http')
+  );
+}
+
+function determineOriginalHost(req: Request): string {
+  const forwarded = parseForwardedHeader(req.get('forwarded'));
+  return (
+    sanitizeHost(forwarded.host) ??
+    sanitizeHost(firstHeaderValue(req.get('x-forwarded-host'))) ??
+    sanitizeHost(req.get('host')) ??
+    'localhost'
+  );
+}
+
 function issuerFromRequest(req: Request): string {
   if (process.env.OAUTH_ISSUER) {
     return process.env.OAUTH_ISSUER;
   }
-  const protocol = req.get('x-forwarded-proto') || req.protocol;
-  const host = req.get('host');
+  const protocol = determineOriginalScheme(req);
+  const host = determineOriginalHost(req);
   return `${protocol}://${host}`;
 }
 

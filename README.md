@@ -35,6 +35,8 @@ The server now authenticates users via OAuth 2.1 with PKCE. Configure it with th
 
 > Remote MCP clients (Claude Web included) expect the OAuth Protected Resource Metadata document at `https://<host>/.well-known/oauth-protected-resource` so they can follow the `resource_metadata` hint in `WWW-Authenticate` challenges. The server serves that document automatically (including mirrored aliases like `/mcp/.well-known/...`), so make sure your reverse proxy forwards those paths.
 
+> If you terminate TLS in a reverse proxy, make sure it forwards either the standard `Forwarded` header or `X-Forwarded-Proto` / `X-Forwarded-Host` so the OAuth metadata advertises the correct `https://` origin. Set `OAUTH_ISSUER=https://your-domain` if you prefer an explicit override.
+
 > ℹ️ Install the appropriate database driver when enabling persistence:  
 > `npm install better-sqlite3` for SQLite, `npm install pg` for PostgreSQL, or `npm install mysql2` for MySQL/MariaDB.
 
