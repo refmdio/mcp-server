@@ -7,6 +7,7 @@ A Model Context Protocol server that exposes RefMD documents over a hosted SSE e
 - Streamable HTTP/SSE transport compatible with hosted MCP clients (e.g. Claude, Cursor)
 - Resource template `refmd://document/{id}` to read document Markdown and metadata
 - Tools for listing, searching, creating, and updating documents via the RefMD API
+- Chunked document reads through optional `offset`/`limit` parameters (each call returns up to 120,000 characters)
 
 ## Prerequisites
 
@@ -103,6 +104,17 @@ Mount a persistent volume (as shown above) so the SQLite database file survives 
 - **Cursor / VS Code / MCP Inspector:** choose an SSE transport and supply the same URL.
 
 Once connected, resources appear under `refmd://document/{id}`. Available tools include `refmd-list-documents`, `refmd-search-documents`, `refmd-create-document`, `refmd-read-document`, `refmd-update-document-content`, and more.
+
+## Reading Large Documents
+
+The `refmd-read-document` tool and the `refmd://document/{id}` resource both support optional pagination parameters so large Markdown files stay under the Model Context Protocol payload limits:
+
+- `offset` (default `0`): starting character position (zero-based).
+- `limit` (default `120000`, capped at `120000`): maximum characters to return in the response.
+
+Example resource URI: `refmd://document/123e4567-e89b-12d3-a456-426614174000?offset=60000&limit=60000`.
+
+Each response includes range metadata and the next offset so clients can issue follow-up calls until the full document is retrieved.
 
 ## Release workflow
 

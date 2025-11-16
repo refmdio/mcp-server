@@ -572,6 +572,94 @@ function formatTags(tags: TagItem[]): string {
     .join('\n');
 }
 
+const MAX_DOCUMENT_CONTENT_CHARS = 120_000;
+
+type DocumentRangeRequest = {
+  offset?: number;
+  limit?: number;
+};
+
+type DocumentRangeSummary = {
+  start: number;
+  end: number;
+  total: number;
+  length: number;
+  remaining: number;
+  hasMore: boolean;
+  nextOffset: number | null;
+  maxChunkSize: number;
+  requestedLength: number;
+};
+
+type DocumentSliceResult = {
+  text: string;
+  range: DocumentRangeSummary;
+};
+
+function sliceDocumentContent(
+  content: string,
+  options?: DocumentRangeRequest,
+): DocumentSliceResult {
+  const total = content.length;
+  const offset = options?.offset ?? 0;
+  if (!Number.isFinite(offset) || offset < 0) {
+    throw new Error('offset must be a non-negative number.');
+  }
+  if (offset > total) {
+    throw new Error(`offset (${offset}) exceeds document length (${total}).`);
+  }
+  const requestedLength = options?.limit ?? MAX_DOCUMENT_CONTENT_CHARS;
+  if (!Number.isFinite(requestedLength) || requestedLength <= 0) {
+    throw new Error('limit must be a positive number.');
+  }
+  const appliedLength = Math.min(requestedLength, MAX_DOCUMENT_CONTENT_CHARS);
+  const end = Math.min(total, offset + appliedLength);
+  const text = content.slice(offset, end);
+  const remaining = Math.max(total - end, 0);
+  return {
+    text,
+    range: {
+      start: offset,
+      end,
+      total,
+      length: end - offset,
+      remaining,
+      hasMore: remaining > 0,
+      nextOffset: remaining > 0 ? end : null,
+      maxChunkSize: MAX_DOCUMENT_CONTENT_CHARS,
+      requestedLength,
+    },
+  };
+}
+
+function parseDocumentRangeFromUri(uri: URL): DocumentRangeRequest {
+  return {
+    offset: parseIntegerQueryParam(uri.searchParams.get('offset'), { field: 'offset', min: 0 }),
+    limit: parseIntegerQueryParam(uri.searchParams.get('limit'), { field: 'limit', min: 1 }),
+  };
+}
+
+function parseIntegerQueryParam(
+  rawValue: string | null,
+  options: { field: string; min: number },
+): number | undefined {
+  if (rawValue === null) {
+    return undefined;
+  }
+  const trimmed = rawValue.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${options.field} value "${rawValue}".`);
+  }
+  if (parsed < options.min) {
+    throw new Error(`${options.field} must be >= ${options.min}.`);
+  }
+  return parsed;
+}
+
 async function fetchCurrentUser(baseUrl: string, token: string): Promise<RefMDUser> {
   const url = new URL('/api/auth/me', baseUrl);
   const response = await fetch(url, {
@@ -1138,7 +1226,7 @@ function buildMcpServer(client: RefMDClient): McpServer {
     },
     {
       instructions:
-        'Use the refmd://document/{id} resources to read Markdown content. Tools allow listing, searching, creating, and editing RefMD documents.',
+        'Use the refmd://document/{id} resources (supports ?offset= and ?limit= for chunked reads) to read Markdown content. Tools allow listing, searching, creating, and editing RefMD documents.',
     },
   );
 
@@ -1181,12 +1269,17 @@ function buildMcpServer(client: RefMDClient): McpServer {
         client.getDocument(id),
         client.getDocumentContent(id),
       ]);
+      const rangeRequest = parseDocumentRangeFromUri(uri);
+      const slice = sliceDocumentContent(content, rangeRequest);
       return {
         contents: [
           {
             uri: uri.href,
             mimeType: 'text/markdown',
-            text: content,
+            text: slice.text,
+            _meta: {
+              range: slice.range,
+            },
           },
           {
             uri: `${uri.href}#metadata`,
@@ -1255,24 +1348,48 @@ function buildMcpServer(client: RefMDClient): McpServer {
     'refmd-read-document',
     {
       title: 'Read document content',
-      description: 'Fetch Markdown content and metadata for a document by id.',
+      description: `Fetch Markdown content and metadata for a document by id. Supports chunked reads via optional offset/limit (limit capped at ${MAX_DOCUMENT_CONTENT_CHARS} characters per call).`,
       inputSchema: {
         id: z.string().uuid('Provide a valid document id.'),
+        offset: z.coerce.number().int().min(0).optional(),
+        limit: z.coerce.number().int().min(1).optional(),
       },
     },
-    async ({ id }) => {
+    async ({ id, offset, limit }) => {
       const [meta, content] = await Promise.all([
         client.getDocument(id),
         client.getDocumentContent(id),
       ]);
+      let slice: DocumentSliceResult;
+      try {
+        slice = sliceDocumentContent(content, { offset, limit });
+      } catch (error) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
+          isError: true,
+        };
+      }
+      const header =
+        slice.range.total === 0
+          ? `Document "${meta.title}" (${meta.id}) is empty.`
+          : `Document "${meta.title}" (${meta.id}) — characters ${slice.range.start}-${slice.range.end} of ${slice.range.total}.`;
+      const continuation = slice.range.hasMore
+        ? `\n\n${slice.range.remaining} characters remain. Call refmd-read-document with offset ${slice.range.nextOffset} (limit up to ${slice.range.maxChunkSize}) to continue.`
+        : '';
+      const body = slice.text || '(empty document)';
       return {
         content: [
           {
             type: 'text',
-            text: content || '(empty document)',
+            text: `${header}${continuation}\n\n${body}`,
           },
         ],
-        structuredContent: { document: meta, content },
+        structuredContent: { document: meta, content: slice.text, range: slice.range },
       };
     },
   );
