@@ -8,6 +8,7 @@ A Model Context Protocol server that exposes RefMD documents over a hosted SSE e
 - Resource template `refmd://document/{id}` to read document Markdown and metadata
 - Tools for listing, searching, creating, and updating documents via the RefMD API
 - Chunked document reads through optional `offset`/`limit` parameters (each call returns up to 120,000 characters)
+- Partial Markdown patching via `refmd-patch-document-content` (insert/delete/replace without reuploading the entire file)
 
 ## Prerequisites
 
@@ -115,6 +116,22 @@ The `refmd-read-document` tool and the `refmd://document/{id}` resource both sup
 Example resource URI: `refmd://document/123e4567-e89b-12d3-a456-426614174000?offset=60000&limit=60000`.
 
 Each response includes range metadata and the next offset so clients can issue follow-up calls until the full document is retrieved.
+
+## Patching Document Content
+
+Use the `refmd-patch-document-content` tool to insert, delete, or replace specific spans without sending the entire Markdown body:
+
+```json
+{
+  "id": "document-uuid",
+  "operations": [
+    { "op": "insert", "offset": 120, "text": "New paragraph." },
+    { "op": "delete", "offset": 42, "length": 5 }
+  ]
+}
+```
+
+Offsets/lengths are counted in Unicode code points to match RefMD’s editor behavior. The server validates ranges and applies the operations atomically before emitting document-change events, so downstream integrations stay in sync.
 
 ## Release workflow
 

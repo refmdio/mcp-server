@@ -123,6 +123,24 @@ type DocumentContentResponse = {
   content?: string | null;
 };
 
+type DocumentPatchOperation =
+  | {
+      op: 'insert';
+      offset: number;
+      text: string;
+    }
+  | {
+      op: 'delete';
+      offset: number;
+      length: number;
+    }
+  | {
+      op: 'replace';
+      offset: number;
+      length: number;
+      text: string;
+    };
+
 type SearchResult = {
   id: string;
   title: string;
@@ -291,6 +309,17 @@ class RefMDClient {
     return this.request<RefMDDocument>(url, {
       method: 'PUT',
       body: JSON.stringify({ content }),
+    });
+  }
+
+  async patchDocumentContent(
+    id: string,
+    operations: DocumentPatchOperation[],
+  ): Promise<RefMDDocument> {
+    const url = this.buildUrl(`/api/documents/${encodeURIComponent(id)}/content`);
+    return this.request<RefMDDocument>(url, {
+      method: 'PATCH',
+      body: JSON.stringify({ operations }),
     });
   }
 
@@ -1218,6 +1247,25 @@ type SessionRecord = {
 
 const sessions = new Map<string, SessionRecord>();
 
+const documentPatchOperationSchema = z.discriminatedUnion('op', [
+  z.object({
+    op: z.literal('insert'),
+    offset: z.number().int().min(0),
+    text: z.string(),
+  }),
+  z.object({
+    op: z.literal('delete'),
+    offset: z.number().int().min(0),
+    length: z.number().int().min(1),
+  }),
+  z.object({
+    op: z.literal('replace'),
+    offset: z.number().int().min(0),
+    length: z.number().int().min(0),
+    text: z.string(),
+  }),
+]);
+
 function buildMcpServer(client: RefMDClient): McpServer {
   const server = new McpServer(
     {
@@ -1414,6 +1462,33 @@ function buildMcpServer(client: RefMDClient): McpServer {
           },
         ],
         structuredContent: { document: updated },
+      };
+    },
+  );
+
+  server.registerTool(
+    'refmd-patch-document-content',
+    {
+      title: 'Patch document Markdown',
+      description:
+        'Apply insert/delete/replace operations to part of a Markdown document without sending the entire file.',
+      inputSchema: {
+        id: z.string().uuid('Provide a valid document id.'),
+        operations: z
+          .array(documentPatchOperationSchema)
+          .min(1, 'Provide at least one patch operation.'),
+      },
+    },
+    async ({ id, operations }: { id: string; operations: DocumentPatchOperation[] }) => {
+      const updated = await client.patchDocumentContent(id, operations);
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `Patched document "${updated.title}" (${updated.id}).`,
+          },
+        ],
+        structuredContent: { document: updated, operations },
       };
     },
   );
